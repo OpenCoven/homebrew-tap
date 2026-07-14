@@ -1,0 +1,62 @@
+name: CI
+
+# Validates the tap on every change: Homebrew style, cask audit, and a
+# real `brew install --cask` smoke test on both macOS architectures so a
+# broken URL, checksum, or app stanza can never land on main.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: brew audit + install (${{ matrix.label }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-15
+            label: Apple Silicon
+          - platform: macos-15-intel
+            label: Intel
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: brew style
+        run: brew style Casks/
+
+      # Audit and install need the checkout to live inside Homebrew's tap
+      # directory (a plain `brew tap` would fetch main, not this revision).
+      - name: Install checkout as the opencoven/tap tap
+        run: |
+          set -euo pipefail
+          tapdir="$(brew --repository)/Library/Taps/opencoven/homebrew-tap"
+          mkdir -p "$(dirname "$tapdir")"
+          rm -rf "$tapdir"
+          cp -R "$GITHUB_WORKSPACE" "$tapdir"
+
+      - name: brew audit
+        run: brew audit --cask --online opencoven/tap/coven-cave
+
+      - name: brew install smoke test
+        run: |
+          set -euo pipefail
+          brew install --cask opencoven/tap/coven-cave
+          test -d /Applications/CovenCave.app
+          /Applications/CovenCave.app/Contents/MacOS/coven-cave --version 2>/dev/null || true
+          codesign --verify --deep --strict /Applications/CovenCave.app
+          spctl --assess --type execute /Applications/CovenCave.app
+
+      - name: brew uninstall
+        if: always()
+        run: brew uninstall --cask coven-cave || true

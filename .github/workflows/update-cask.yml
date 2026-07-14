@@ -1,0 +1,98 @@
+name: Update cask
+
+# Keeps Casks/coven-cave.rb pointed at the latest stable CovenCave release.
+#
+# Triggers, in order of preference:
+#   - repository_dispatch `coven-cave-release` — fired by coven-cave's
+#     release workflow the moment a release finishes uploading artifacts
+#     (payload: {"tag": "vX.Y.Z"}). Needs a HOMEBREW_TAP_TOKEN secret on
+#     the coven-cave side; see that repo's .github/workflows/release.yml.
+#   - schedule — every 6 hours, as a no-secrets fallback so the cask heals
+#     itself even if the dispatch hook is never configured.
+#   - workflow_dispatch — manual runs, optionally pinned to a tag.
+#
+# The update script is fail-closed: it refuses to render the cask unless
+# the release's SHA256SUMS lists both DMGs and both DMGs are downloadable,
+# so a partial or still-uploading release can never break `brew install`.
+# The rendered cask is style-checked and audited before the commit is
+# pushed to main with the workflow's own GITHUB_TOKEN (no cross-repo
+# secrets required in this repository).
+
+on:
+  repository_dispatch:
+    types: [coven-cave-release]
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to render (e.g. v0.1.1). Empty = latest stable release."
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-cask
+  cancel-in-progress: false
+
+jobs:
+  update:
+    name: Render, validate, push
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Resolve requested tag
+        env:
+          DISPATCH_TAG: ${{ github.event.client_payload.tag }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          set -euo pipefail
+          TAG="${DISPATCH_TAG:-${INPUT_TAG:-}}"
+          echo "REQUESTED_TAG=$TAG" >> "$GITHUB_ENV"
+          echo "requested tag: ${TAG:-<latest>}"
+
+      - name: Render cask from release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: scripts/update-cask.sh "$REQUESTED_TAG"
+
+      - name: Detect changes
+        id: diff
+        run: |
+          set -euo pipefail
+          if git diff --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "cask already up to date"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            git --no-pager diff
+          fi
+
+      - name: brew style
+        if: steps.diff.outputs.changed == 'true'
+        run: brew style Casks/
+
+      - name: brew audit
+        if: steps.diff.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          tapdir="$(brew --repository)/Library/Taps/opencoven/homebrew-tap"
+          mkdir -p "$(dirname "$tapdir")"
+          rm -rf "$tapdir"
+          cp -R "$GITHUB_WORKSPACE" "$tapdir"
+          brew audit --cask --online opencoven/tap/coven-cave
+
+      - name: Commit and push
+        if: steps.diff.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          version="$(awk -F'"' '/^  version /{print $2}' Casks/coven-cave.rb)"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Casks/coven-cave.rb
+          git commit -m "coven-cave $version"
+          git push origin HEAD:main
+          echo "pushed cask bump to $version"
