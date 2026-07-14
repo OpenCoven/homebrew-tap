@@ -46,6 +46,8 @@ jobs:
           cp -R "$GITHUB_WORKSPACE" "$tapdir"
 
       - name: brew audit
+        env:
+          HOMEBREW_GITHUB_API_TOKEN: ${{ github.token }}
         run: brew audit --cask --online opencoven/tap/coven-cave
 
       - name: brew install smoke test

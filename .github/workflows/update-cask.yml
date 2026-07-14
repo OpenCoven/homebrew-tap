@@ -77,6 +77,8 @@ jobs:
 
       - name: brew audit
         if: steps.diff.outputs.changed == 'true'
+        env:
+          HOMEBREW_GITHUB_API_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           tapdir="$(brew --repository)/Library/Taps/opencoven/homebrew-tap"
