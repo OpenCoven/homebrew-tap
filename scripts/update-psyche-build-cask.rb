@@ -174,13 +174,25 @@ class PsycheBuildCaskUpdater
     command = ["curl", "--fail-with-body", "--silent", "--show-error", "--location"]
     command.concat(["--header", "Accept: application/vnd.github+json"]) if api
     token = ENV["GITHUB_TOKEN"]
-    command.concat(["--header", "Authorization: Bearer #{token}"]) if api && token && !token.empty?
+    stdin_data = ""
+    if api && token && !token.empty?
+      unless /\A[[:graph:]]+\z/.match?(token)
+        raise Error, "GITHUB_TOKEN contains unsupported characters"
+      end
+
+      escaped_token = token.gsub("\\", "\\\\").gsub('"', '\\"')
+      stdin_data = "header = \"Authorization: Bearer #{escaped_token}\""
+      command.concat(["--config", "-"])
+    end
     command.concat(["--output", output]) if output
     command.concat(["--write-out", write_out]) if write_out
     command << url
 
-    stdout, stderr, status = Open3.capture3(*command)
-    raise Error, "curl failed for #{url}: #{stderr.strip}" unless status.success?
+    stdout, stderr, status = Open3.capture3(*command, stdin_data: stdin_data)
+    unless status.success?
+      safe_stderr = token && !token.empty? ? stderr.gsub(token, "[REDACTED]") : stderr
+      raise Error, "curl failed for #{url}: #{safe_stderr.strip}"
+    end
 
     stdout
   rescue Errno::ENOENT
@@ -200,10 +212,10 @@ class PsycheBuildCaskUpdater
 
         url "https://github.com/OpenCoven/psyche-build/releases/download/v\#{version}/Psyche-Build-v\#{version}-\#{arch}.dmg"
         name "Psyche Build"
-        desc "Desktop app for building and managing OpenCoven psyche projects"
+        desc "Multiagent coding harness for parallel agent lanes"
         homepage "https://github.com/OpenCoven/psyche-build"
 
-        depends_on macos: :sonoma
+        depends_on macos: :monterey
 
         app "Psyche Build.app"
 

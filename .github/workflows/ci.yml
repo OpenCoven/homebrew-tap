@@ -92,6 +92,9 @@ jobs:
           set -euo pipefail
           brew install --cask opencoven/tap/psyche-build
           test -d "/Applications/Psyche Build.app"
+          codesign --verify --deep --strict "/Applications/Psyche Build.app"
+          spctl --assess --type execute "/Applications/Psyche Build.app"
+          xcrun stapler validate "/Applications/Psyche Build.app"
           open -n "/Applications/Psyche Build.app"
 
           for _ in $(seq 1 30); do
@@ -119,14 +122,37 @@ jobs:
 
       - name: Uninstall Psyche Build
         if: hashFiles('Casks/psyche-build.rb') != ''
-        run: brew uninstall --cask psyche-build
+        run: |
+          set -euo pipefail
+          brew uninstall --cask psyche-build
+          test ! -e "/Applications/Psyche Build.app"
 
       - name: Reinstall and zap Psyche Build
         if: hashFiles('Casks/psyche-build.rb') != ''
         run: |
           set -euo pipefail
           brew install --cask opencoven/tap/psyche-build
+          zap_paths=(
+            "$HOME/Library/Application Support/dev.opencoven.psyche"
+            "$HOME/Library/Caches/dev.opencoven.psyche"
+            "$HOME/Library/Preferences/dev.opencoven.psyche.plist"
+            "$HOME/Library/Saved Application State/dev.opencoven.psyche.savedState"
+            "$HOME/Library/WebKit/dev.opencoven.psyche"
+          )
+          for path in "${zap_paths[@]}"; do
+            if [[ "$path" == *.plist ]]; then
+              mkdir -p "$(dirname "$path")"
+              : > "$path"
+            else
+              mkdir -p "$path"
+              : > "$path/.homebrew-zap-marker"
+            fi
+          done
           brew uninstall --cask --zap psyche-build
+          test ! -e "/Applications/Psyche Build.app"
+          for path in "${zap_paths[@]}"; do
+            test ! -e "$path"
+          done
 
       - name: Clean up Psyche Build
         if: always()
@@ -136,4 +162,4 @@ jobs:
           if [[ -n "$pids" ]]; then
             kill -TERM $pids || true
           fi
-          brew uninstall --cask --force psyche-build 2>/dev/null || true
+          brew uninstall --cask --zap --force psyche-build 2>/dev/null || true

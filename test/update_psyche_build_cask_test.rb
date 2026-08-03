@@ -3,6 +3,7 @@
 require "json"
 require "minitest/autorun"
 require "open3"
+require "psych"
 require "tmpdir"
 
 class UpdatePsycheBuildCaskTest < Minitest::Test
@@ -13,6 +14,9 @@ class UpdatePsycheBuildCaskTest < Minitest::Test
   CI_WORKFLOW = File.join(ROOT, ".github/workflows/ci.yml")
   UPDATE_WORKFLOW = File.join(ROOT, ".github/workflows/update-psyche-build-cask.yml")
   TAG = "v0.0.1"
+  API_LATEST = "https://api.github.com/repos/OpenCoven/psyche-build/releases/latest"
+  API_TAG = "https://api.github.com/repos/OpenCoven/psyche-build/releases/tags/v0.0.1"
+  DOWNLOAD_ROOT = "https://github.com/OpenCoven/psyche-build/releases/download/v0.0.1"
 
   EXPECTED_CASK = <<~RUBY
     # frozen_string_literal: true
@@ -26,10 +30,10 @@ class UpdatePsycheBuildCaskTest < Minitest::Test
 
       url "https://github.com/OpenCoven/psyche-build/releases/download/v\#{version}/Psyche-Build-v\#{version}-\#{arch}.dmg"
       name "Psyche Build"
-      desc "Desktop app for building and managing OpenCoven psyche projects"
+      desc "Multiagent coding harness for parallel agent lanes"
       homepage "https://github.com/OpenCoven/psyche-build"
 
-      depends_on macos: :sonoma
+      depends_on macos: :monterey
 
       app "Psyche Build.app"
 
@@ -267,12 +271,187 @@ class UpdatePsycheBuildCaskTest < Minitest::Test
     end
   end
 
-  def test_ci_launches_the_exact_app_path_and_always_cleans_up
+  def test_rejects_malformed_release_json_and_field_types_without_mutating_output
+    cases = {
+      "invalid JSON" => ["{not-json", /JSON|unexpected token/i],
+      "top-level array" => ["[]", /release JSON must be an object/i],
+      "non-string tag" => [JSON.generate(JSON.parse(File.binread(RELEASE_FIXTURE)).merge("tag_name" => 1)), /release tag/i],
+      "non-array assets" => [JSON.generate(JSON.parse(File.binread(RELEASE_FIXTURE)).merge("assets" => {})), /assets must be an array/i],
+      "non-boolean draft" => [JSON.generate(JSON.parse(File.binread(RELEASE_FIXTURE)).merge("draft" => "false")), /published stable release/i],
+      "non-string published_at" => [JSON.generate(JSON.parse(File.binread(RELEASE_FIXTURE)).merge("published_at" => 1)), /published stable release/i],
+    }
+
+    cases.each do |label, (release_contents, message)|
+      with_files(release_contents: release_contents) do |release, checksums, output|
+        File.binwrite(output, "preserve\n")
+        result = run_updater(release: release, checksums: checksums, output: output)
+        assert_failure result, message, label
+        assert_equal "preserve\n", File.binread(output), label
+      end
+    end
+  end
+
+  def test_live_latest_uses_ordered_authenticated_api_and_unauthenticated_asset_requests
+    sentinel = "ghs_DO_NOT_LEAK_THIS_SENTINEL"
+    with_fake_curl(token: sentinel) do |environment, log, output|
+      result = run_live_updater(environment, output: output)
+      assert_success result
+      assert_equal EXPECTED_CASK, File.binread(output)
+
+      requests = fake_curl_requests(log)
+      assert_equal [
+        API_LATEST,
+        "#{DOWNLOAD_ROOT}/SHA256SUMS",
+        "#{DOWNLOAD_ROOT}/Psyche-Build-v0.0.1-aarch64.dmg",
+        "#{DOWNLOAD_ROOT}/Psyche-Build-v0.0.1-x86_64.dmg",
+      ], requests.map { |request| request.fetch(:url) }
+      assert_equal [true, false, false, false], requests.map { |request| request.fetch(:authenticated) }
+      requests.each do |request|
+        assert_includes request.fetch(:arguments), "--fail-with-body"
+        assert_includes request.fetch(:arguments), "--silent"
+        assert_includes request.fetch(:arguments), "--show-error"
+        assert_includes request.fetch(:arguments), "--location"
+      end
+      assert_includes requests.first.fetch(:arguments), "--config -"
+
+      refute_includes File.binread(log), sentinel
+      refute_includes result.stdout, sentinel
+      refute_includes result.stderr, sentinel
+    end
+  end
+
+  def test_live_explicit_tag_uses_tag_endpoint_without_api_auth_when_token_is_absent
+    with_fake_curl(token: nil) do |environment, log, output|
+      result = run_live_updater(environment, tag: TAG, output: output)
+      assert_success result
+      requests = fake_curl_requests(log)
+      assert_equal API_TAG, requests.first.fetch(:url)
+      refute requests.first.fetch(:authenticated)
+      assert_equal EXPECTED_CASK, File.binread(output)
+    end
+  end
+
+  def test_live_non_200_dmg_preserves_existing_output
+    with_fake_curl(mode: "non_200_arm") do |environment, _log, output|
+      File.binwrite(output, "preserve\n")
+      result = run_live_updater(environment, output: output)
+      assert_failure result, /did not resolve HTTP 200.*503/i
+      assert_equal "preserve\n", File.binread(output)
+    end
+  end
+
+  def test_live_curl_failure_preserves_output_and_omits_token_from_diagnostics
+    sentinel = "ghs_DO_NOT_LEAK_THIS_SENTINEL"
+    with_fake_curl(mode: "fail_checksums", token: sentinel) do |environment, log, output|
+      File.binwrite(output, "preserve\n")
+      result = run_live_updater(environment, output: output)
+      assert_failure result, /curl failed.*SHA256SUMS/i
+      assert_equal "preserve\n", File.binread(output)
+      refute_includes File.binread(log), sentinel
+      refute_includes result.stdout, sentinel
+      refute_includes result.stderr, sentinel
+    end
+  end
+
+  def test_live_missing_curl_preserves_existing_output
+    Dir.mktmpdir do |dir|
+      File.symlink("/usr/bin/uname", File.join(dir, "uname"))
+      output = File.join(dir, "psyche-build.rb")
+      File.binwrite(output, "preserve\n")
+      result = run_live_updater({ "PATH" => dir }, output: output)
+      assert_failure result, /curl is required/i
+      assert_equal "preserve\n", File.binread(output)
+    end
+  end
+
+  def test_ci_verifies_installed_app_trust_before_launch_and_always_cleans_up
     workflow = File.binread(CI_WORKFLOW)
 
-    assert_includes workflow, 'open -n "/Applications/Psyche Build.app"'
+    app = '"/Applications/Psyche Build.app"'
+    codesign = "codesign --verify --deep --strict #{app}"
+    gatekeeper = "spctl --assess --type execute #{app}"
+    stapler = "xcrun stapler validate #{app}"
+    launch = "open -n #{app}"
+    assert_includes workflow, codesign
+    assert_includes workflow, gatekeeper
+    assert_includes workflow, stapler
+    assert_includes workflow, launch
+    assert_operator workflow.index(codesign), :<, workflow.index(launch)
+    assert_operator workflow.index(gatekeeper), :<, workflow.index(launch)
+    assert_operator workflow.index(stapler), :<, workflow.index(launch)
     refute_includes workflow, 'open -na "/Applications/Psyche Build.app"'
     assert_match(/- name: Clean up Psyche Build\n\s+if: always\(\)/, workflow)
+  end
+
+  def test_ci_proves_normal_uninstall_and_every_zap_path
+    workflow = File.binread(CI_WORKFLOW)
+    paths = [
+      "$HOME/Library/Application Support/dev.opencoven.psyche",
+      "$HOME/Library/Caches/dev.opencoven.psyche",
+      "$HOME/Library/Preferences/dev.opencoven.psyche.plist",
+      "$HOME/Library/Saved Application State/dev.opencoven.psyche.savedState",
+      "$HOME/Library/WebKit/dev.opencoven.psyche",
+    ]
+
+    assert_match(/brew uninstall --cask psyche-build\n\s+test ! -e "\/Applications\/Psyche Build\.app"/, workflow)
+    paths.each { |path| assert_includes workflow, path }
+    assert_includes workflow, 'test ! -e "$path"'
+    assert_includes workflow, "brew uninstall --cask --zap psyche-build"
+    assert_includes workflow, "brew uninstall --cask --zap --force psyche-build"
+  end
+
+  def test_workflows_parse_structurally_and_every_run_block_has_bash_syntax
+    {
+      CI_WORKFLOW => {
+        "updater-tests" => ["Ruby syntax", "Updater tests"],
+        "test" => ["Install and launch Psyche Build", "Reinstall and zap Psyche Build", "Clean up Psyche Build"],
+      },
+      UPDATE_WORKFLOW => {
+        "update" => ["Resolve requested tag", "Render Cask from published release", "Push bot branch"],
+      },
+    }.each do |path, jobs|
+      parsed = parse_workflow(path)
+      jobs.each do |job_name, expected_steps|
+        steps = parsed.fetch("jobs").fetch(job_name).fetch("steps")
+        names = steps.map { |step| step["name"] }.compact
+        expected_steps.each { |name| assert_includes names, name }
+      end
+
+      workflow_steps(parsed).each do |step|
+        next unless step["run"]
+
+        _stdout, stderr, status = Open3.capture3("bash", "-n", stdin_data: step.fetch("run"))
+        assert status.success?, "#{path} step #{step['name'].inspect} has invalid Bash: #{stderr}"
+      end
+
+      workflow_steps(parsed).map { |step| step["uses"] }.compact.each do |uses|
+        assert_match(/@[0-9a-f]{40}\z/, uses)
+      end
+    end
+  end
+
+  def test_resolve_tag_step_accepts_empty_or_stable_tags_without_environment_injection
+    step = workflow_steps(parse_workflow(UPDATE_WORKFLOW)).find { |candidate| candidate["name"] == "Resolve requested tag" }
+    refute_nil step
+
+    { "" => "REQUESTED_TAG=\n", "v0.0.1" => "REQUESTED_TAG=v0.0.1\n" }.each do |tag, expected|
+      Dir.mktmpdir do |dir|
+        environment_file = File.join(dir, "github-env")
+        result = run_bash_step(step.fetch("run"), "DISPATCH_TAG" => tag, "INPUT_TAG" => "", "GITHUB_ENV" => environment_file)
+        assert_success result
+        assert_equal expected, File.binread(environment_file)
+      end
+    end
+
+    ["0.0.1", "v0.0.1-rc.1", "v01.0.1", "v0.0.1\nINJECTED=true", "v0.0.1\rINJECTED=true"].each do |tag|
+      Dir.mktmpdir do |dir|
+        environment_file = File.join(dir, "github-env")
+        File.binwrite(environment_file, "preserve=true\n")
+        result = run_bash_step(step.fetch("run"), "DISPATCH_TAG" => tag, "INPUT_TAG" => "", "GITHUB_ENV" => environment_file)
+        assert_failure result, /stable vMAJOR\.MINOR\.PATCH/i, tag.inspect
+        assert_equal "preserve=true\n", File.binread(environment_file)
+      end
+    end
   end
 
   def test_update_workflow_handles_new_and_existing_bot_branches_safely
@@ -338,7 +517,14 @@ class UpdatePsycheBuildCaskTest < Minitest::Test
     Result.new(stdout: stdout, stderr: stderr, status: status)
   end
 
-  def with_files(release_change: nil, checksum_contents: nil)
+  def run_live_updater(environment, tag: nil, output:)
+    arguments = [RbConfig.ruby, SCRIPT, "--output", output]
+    arguments.concat(["--tag", tag]) if tag
+    stdout, stderr, status = Open3.capture3(environment, *arguments)
+    Result.new(stdout: stdout, stderr: stderr, status: status)
+  end
+
+  def with_files(release_change: nil, release_contents: nil, checksum_contents: nil)
     Dir.mktmpdir do |dir|
       release = File.join(dir, "release.json")
       checksums = File.join(dir, "SHA256SUMS")
@@ -346,10 +532,113 @@ class UpdatePsycheBuildCaskTest < Minitest::Test
 
       json = JSON.parse(File.binread(RELEASE_FIXTURE))
       release_change&.call(json)
-      File.binwrite(release, JSON.pretty_generate(json))
+      File.binwrite(release, release_contents || JSON.pretty_generate(json))
       File.binwrite(checksums, checksum_contents || File.binread(CHECKSUM_FIXTURE))
       yield release, checksums, output
     end
+  end
+
+  def with_fake_curl(mode: "success", token: nil)
+    Dir.mktmpdir do |dir|
+      bin = File.join(dir, "bin")
+      Dir.mkdir(bin)
+      curl = File.join(bin, "curl")
+      log = File.join(dir, "curl.log")
+      output = File.join(dir, "psyche-build.rb")
+      File.binwrite(curl, fake_curl_script)
+      File.chmod(0o700, curl)
+      File.symlink("/usr/bin/uname", File.join(bin, "uname"))
+
+      environment = {
+        "PATH" => bin,
+        "FAKE_CURL_LOG" => log,
+        "FAKE_CURL_MODE" => mode,
+        "FAKE_RELEASE_JSON" => RELEASE_FIXTURE,
+        "FAKE_CHECKSUMS" => CHECKSUM_FIXTURE,
+        "GITHUB_TOKEN" => token,
+      }
+      yield environment, log, output
+    end
+  end
+
+  def fake_curl_script
+    <<~'BASH'
+      #!/bin/bash
+      set -euo pipefail
+
+      config="$(/bin/cat)"
+      url="${!#}"
+      authenticated=false
+      if [[ -n "$config" ]]; then
+        expected="header = \"Authorization: Bearer ${GITHUB_TOKEN:-}\""
+        if [[ -z "${GITHUB_TOKEN:-}" || "$config" != "$expected" ]]; then
+          echo "invalid auth config" >&2
+          exit 90
+        fi
+        authenticated=true
+      fi
+      if [[ "$url" != https://api.github.com/* && "$authenticated" == true ]]; then
+        echo "auth supplied to non-API request" >&2
+        exit 91
+      fi
+
+      {
+        printf '%s\t%s\t' "$url" "$authenticated"
+        printf '%q ' "$@"
+        printf '\n'
+      } >> "$FAKE_CURL_LOG"
+
+      case "${FAKE_CURL_MODE:-success}:$url" in
+        fail_api:https://api.github.com/*)
+          echo "simulated curl API failure" >&2
+          exit 22
+          ;;
+        fail_checksums:*\/SHA256SUMS)
+          echo "simulated curl checksum failure ${GITHUB_TOKEN:-}" >&2
+          exit 22
+          ;;
+        non_200_arm:*aarch64.dmg)
+          printf '503'
+          exit 0
+          ;;
+      esac
+
+      case "$url" in
+        https://api.github.com/repos/OpenCoven/psyche-build/releases/latest|https://api.github.com/repos/OpenCoven/psyche-build/releases/tags/v0.0.1)
+          /bin/cat "$FAKE_RELEASE_JSON"
+          ;;
+        https://github.com/OpenCoven/psyche-build/releases/download/v0.0.1/SHA256SUMS)
+          /bin/cat "$FAKE_CHECKSUMS"
+          ;;
+        https://github.com/OpenCoven/psyche-build/releases/download/v0.0.1/Psyche-Build-v0.0.1-aarch64.dmg|https://github.com/OpenCoven/psyche-build/releases/download/v0.0.1/Psyche-Build-v0.0.1-x86_64.dmg)
+          printf '200'
+          ;;
+        *)
+          echo "unexpected URL" >&2
+          exit 92
+          ;;
+      esac
+    BASH
+  end
+
+  def fake_curl_requests(log)
+    File.readlines(log).map do |line|
+      url, authenticated, arguments = line.chomp.split("\t", 3)
+      { url: url, authenticated: authenticated == "true", arguments: arguments }
+    end
+  end
+
+  def parse_workflow(path)
+    Psych.safe_load(File.binread(path), [], [], true)
+  end
+
+  def workflow_steps(parsed)
+    parsed.fetch("jobs").values.flat_map { |job| job.fetch("steps") }
+  end
+
+  def run_bash_step(script, environment)
+    stdout, stderr, status = Open3.capture3(environment, "bash", "--noprofile", "--norc", "-euo", "pipefail", "-c", script)
+    Result.new(stdout: stdout, stderr: stderr, status: status)
   end
 
   def assert_success(result)

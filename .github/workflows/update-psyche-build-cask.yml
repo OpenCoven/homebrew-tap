@@ -42,7 +42,11 @@ jobs:
         run: |
           set -euo pipefail
           requested_tag="${DISPATCH_TAG:-${INPUT_TAG:-}}"
-          echo "REQUESTED_TAG=$requested_tag" >> "$GITHUB_ENV"
+          if [[ -n "$requested_tag" && ! "$requested_tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "error: tag must be a stable vMAJOR.MINOR.PATCH release tag" >&2
+            exit 1
+          fi
+          printf 'REQUESTED_TAG=%s\n' "$requested_tag" >> "$GITHUB_ENV"
           echo "requested tag: ${requested_tag:-<latest stable>}"
 
       - name: Render Cask from published release
