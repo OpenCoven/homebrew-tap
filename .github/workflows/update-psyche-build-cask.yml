@@ -1,0 +1,160 @@
+name: Update Psyche Build cask
+
+on:
+  repository_dispatch:
+    types: [psyche-build-release]
+  schedule:
+    - cron: "41 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Stable release tag (for example v0.0.1). Empty selects the latest stable release."
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: update-psyche-build-cask
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash --noprofile --norc -euo pipefail {0}
+
+jobs:
+  update:
+    name: Render, validate, and propose
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Resolve requested tag
+        env:
+          DISPATCH_TAG: ${{ github.event.client_payload.tag }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          set -euo pipefail
+          requested_tag="${DISPATCH_TAG:-${INPUT_TAG:-}}"
+          if [[ -n "$requested_tag" && ! "$requested_tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "error: tag must be a stable vMAJOR.MINOR.PATCH release tag" >&2
+            exit 1
+          fi
+          printf 'REQUESTED_TAG=%s\n' "$requested_tag" >> "$GITHUB_ENV"
+          echo "requested tag: ${requested_tag:-<latest stable>}"
+
+      - name: Render Cask from published release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          args=(--output Casks/psyche-build.rb)
+          if [[ -n "$REQUESTED_TAG" ]]; then
+            args+=(--tag "$REQUESTED_TAG")
+          fi
+          ruby scripts/update-psyche-build-cask.rb "${args[@]}"
+
+      - name: Validate updater and Cask syntax
+        run: |
+          set -euo pipefail
+          ruby -c scripts/update-psyche-build-cask.rb
+          ruby -c Casks/psyche-build.rb
+          ruby -Itest test/update_psyche_build_cask_test.rb
+
+      - name: brew style
+        run: brew style Casks/
+
+      - name: Install checkout as opencoven/tap
+        run: |
+          set -euo pipefail
+          tapdir="$(brew --repository)/Library/Taps/opencoven/homebrew-tap"
+          mkdir -p "$(dirname "$tapdir")"
+          rm -rf "$tapdir"
+          cp -R "$GITHUB_WORKSPACE" "$tapdir"
+
+      - name: brew audit
+        env:
+          HOMEBREW_GITHUB_API_TOKEN: ${{ github.token }}
+        run: brew audit --cask --online opencoven/tap/psyche-build
+
+      - name: Prepare bot branch
+        id: change
+        run: |
+          set -euo pipefail
+          version="$(ruby -ne 'puts $1 if /^  version "([^"]+)"/' Casks/psyche-build.rb)"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "invalid rendered version: $version" >&2
+            exit 1
+          fi
+
+          branch="automation/psyche-build-v${version}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+
+          if git ls-files --error-unmatch Casks/psyche-build.rb >/dev/null 2>&1 &&
+             git diff --quiet -- Casks/psyche-build.rb; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Cask is already current at v$version"
+            exit 0
+          fi
+
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -C "$branch"
+          git add Casks/psyche-build.rb
+          git commit -m "psyche-build $version"
+
+      - name: Push bot branch
+        if: steps.change.outputs.changed == 'true'
+        env:
+          BRANCH: ${{ steps.change.outputs.branch }}
+        run: |
+          set -euo pipefail
+          remote_ref="refs/heads/$BRANCH"
+          if remote_line="$(git ls-remote --exit-code --heads origin "$remote_ref")"; then
+            remote_sha="${remote_line%%[[:space:]]*}"
+            if [[ ! "$remote_sha" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "invalid remote branch SHA: $remote_sha" >&2
+              exit 1
+            fi
+            git fetch --no-tags origin "$remote_ref:refs/remotes/origin/$BRANCH"
+            test "$(git rev-parse "refs/remotes/origin/$BRANCH")" = "$remote_sha"
+            git push --force-with-lease="refs/heads/$BRANCH:$remote_sha" origin "HEAD:$remote_ref"
+          else
+            status=$?
+            if [[ "$status" -ne 2 ]]; then
+              echo "failed to inspect remote bot branch (git ls-remote exit $status)" >&2
+              exit "$status"
+            fi
+            git push --force-with-lease="refs/heads/$BRANCH:" origin "HEAD:refs/heads/$BRANCH"
+          fi
+
+      - name: Create or update pull request
+        if: steps.change.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.change.outputs.branch }}
+          VERSION: ${{ steps.change.outputs.version }}
+        run: |
+          set -euo pipefail
+          body_file="$(mktemp)"
+          trap 'rm -f "$body_file"' EXIT
+          cat > "$body_file" <<EOF
+          Automated Psyche Build Cask update for the complete published v${VERSION} release.
+
+          The updater verified the release metadata, exact asset URLs, SHA256SUMS entries, and HTTP 200 availability for both architecture-specific DMGs before rendering. CI performs native Apple Silicon and Intel install, launch, upgrade, uninstall, and zap validation.
+          EOF
+
+          existing="$(gh pr list --base main --head "$BRANCH" --state open --json number --jq '.[0].number // empty')"
+          if [[ -n "$existing" ]]; then
+            gh pr edit "$existing" --title "psyche-build $VERSION" --body-file "$body_file"
+          else
+            gh pr create --base main --head "$BRANCH" --title "psyche-build $VERSION" --body-file "$body_file"
+          fi

@@ -1,6 +1,8 @@
 # OpenCoven Homebrew Tap
 
-Homebrew tap for [OpenCoven](https://github.com/OpenCoven) apps.
+Homebrew tap for [OpenCoven](https://github.com/OpenCoven) apps. It ships
+CovenCave today; Psyche Build becomes available after its public v0.0.1
+release is published and the generated Cask pull request is merged.
 
 ## Install CovenCave
 
@@ -31,22 +33,57 @@ The cask installs the signed + notarized per-architecture DMG (Apple
 Silicon and Intel) from the latest
 [coven-cave release](https://github.com/OpenCoven/coven-cave/releases/latest).
 
-## How the cask stays current
+## Install Psyche Build
 
-`.github/workflows/update-cask.yml` re-renders the cask from the newest
-stable release — triggered by a `repository_dispatch` from coven-cave's
-release pipeline the moment artifacts finish uploading, with a 6-hourly
-schedule as a no-secrets fallback. `scripts/update-cask.sh` is fail-closed:
-it only renders when the release's `SHA256SUMS` covers both DMGs and both
-are downloadable. Every change is validated with `brew style`,
-`brew audit --cask --online`, and (in CI) a real `brew install --cask`
-smoke test on both macOS architectures.
+After the public v0.0.1 release and Cask merge:
+
+```bash
+brew install --cask opencoven/tap/psyche-build
+brew upgrade --cask opencoven/tap/psyche-build
+brew uninstall --cask opencoven/tap/psyche-build
+```
+
+Use `brew uninstall --cask --zap opencoven/tap/psyche-build` to also remove
+the app's confirmed Tauri bundle data. The Cask does not remove `~/.psyche`
+or Psyche Build project data.
+
+## How the Casks stay current
+
+The two apps intentionally use different update paths:
+
+- `.github/workflows/update-cask.yml` keeps CovenCave current with the
+  existing direct-to-main updater. `scripts/update-cask.sh` requires both
+  checksums and downloadable DMGs before it writes the Cask.
+- `.github/workflows/update-psyche-build-cask.yml` never pushes main. It
+  verifies the complete published Psyche Build release, renders the Cask,
+  validates it, and creates or updates a versioned automation pull request.
+  A six-hour schedule recovers if the release dispatch is missed.
+
+Psyche Build's release pipeline should send repository dispatch type
+`psyche-build-release` with payload `{"tag":"v0.0.1"}`. A maintainer can
+recover manually by running the **Update Psyche Build cask** workflow with
+tag `v0.0.1`; leaving the tag empty selects the latest stable release.
+
+Every Cask change is style-checked and audited online. CI continues to
+install-test CovenCave on both macOS architectures, and automatically adds
+native Apple Silicon and Intel install, launch, no-op upgrade, uninstall,
+reinstall, and zap tests once `Casks/psyche-build.rb` exists.
 
 Manual bump:
 
 ```bash
 scripts/update-cask.sh          # latest stable release
 scripts/update-cask.sh v0.1.0   # specific tag
+```
+
+Offline Psyche Build renderer verification:
+
+```bash
+ruby scripts/update-psyche-build-cask.rb \
+  --tag v0.0.1 \
+  --release-json test/fixtures/psyche-build-v0.0.1-release.json \
+  --checksums test/fixtures/psyche-build-v0.0.1-SHA256SUMS \
+  --output /tmp/psyche-build.rb
 ```
 
 ## License

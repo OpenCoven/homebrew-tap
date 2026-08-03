@@ -18,6 +18,19 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  updater-tests:
+    name: Psyche Build updater tests
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Ruby syntax
+        run: ruby -c scripts/update-psyche-build-cask.rb
+
+      - name: Updater tests
+        run: ruby -Itest test/update_psyche_build_cask_test.rb
+
   test:
     name: brew audit + install (${{ matrix.label }})
     strategy:
@@ -29,6 +42,7 @@ jobs:
           - platform: macos-15-intel
             label: Intel
     runs-on: ${{ matrix.platform }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
@@ -62,3 +76,90 @@ jobs:
       - name: brew uninstall
         if: always()
         run: brew uninstall --cask coven-cave || true
+
+      # Psyche Build is release-gated. Task 7 lands the updater and CI before
+      # the first public Cask, so these checks activate only once that Cask is
+      # generated from a complete public release.
+      - name: brew audit Psyche Build
+        if: hashFiles('Casks/psyche-build.rb') != ''
+        env:
+          HOMEBREW_GITHUB_API_TOKEN: ${{ github.token }}
+        run: brew audit --cask --online opencoven/tap/psyche-build
+
+      - name: Install and launch Psyche Build
+        if: hashFiles('Casks/psyche-build.rb') != ''
+        run: |
+          set -euo pipefail
+          brew install --cask opencoven/tap/psyche-build
+          test -d "/Applications/Psyche Build.app"
+          codesign --verify --deep --strict "/Applications/Psyche Build.app"
+          spctl --assess --type execute "/Applications/Psyche Build.app"
+          xcrun stapler validate "/Applications/Psyche Build.app"
+          open -n "/Applications/Psyche Build.app"
+
+          for _ in $(seq 1 30); do
+            pgrep -f '/Applications/Psyche Build.app/Contents/MacOS/' > "$RUNNER_TEMP/psyche-build.pids" || true
+            if test -s "$RUNNER_TEMP/psyche-build.pids"; then
+              break
+            fi
+            sleep 1
+          done
+          test -s "$RUNNER_TEMP/psyche-build.pids"
+          xargs kill -TERM < "$RUNNER_TEMP/psyche-build.pids"
+
+          for _ in $(seq 1 15); do
+            if ! pgrep -f '/Applications/Psyche Build.app/Contents/MacOS/' >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Psyche Build did not stop after TERM" >&2
+          exit 1
+
+      - name: No-op upgrade Psyche Build
+        if: hashFiles('Casks/psyche-build.rb') != ''
+        run: brew upgrade --cask opencoven/tap/psyche-build
+
+      - name: Uninstall Psyche Build
+        if: hashFiles('Casks/psyche-build.rb') != ''
+        run: |
+          set -euo pipefail
+          brew uninstall --cask psyche-build
+          test ! -e "/Applications/Psyche Build.app"
+
+      - name: Reinstall and zap Psyche Build
+        if: hashFiles('Casks/psyche-build.rb') != ''
+        run: |
+          set -euo pipefail
+          brew install --cask opencoven/tap/psyche-build
+          zap_paths=(
+            "$HOME/Library/Application Support/dev.opencoven.psyche"
+            "$HOME/Library/Caches/dev.opencoven.psyche"
+            "$HOME/Library/Preferences/dev.opencoven.psyche.plist"
+            "$HOME/Library/Saved Application State/dev.opencoven.psyche.savedState"
+            "$HOME/Library/WebKit/dev.opencoven.psyche"
+          )
+          for path in "${zap_paths[@]}"; do
+            if [[ "$path" == *.plist ]]; then
+              mkdir -p "$(dirname "$path")"
+              : > "$path"
+            else
+              mkdir -p "$path"
+              : > "$path/.homebrew-zap-marker"
+            fi
+          done
+          brew uninstall --cask --zap psyche-build
+          test ! -e "/Applications/Psyche Build.app"
+          for path in "${zap_paths[@]}"; do
+            test ! -e "$path"
+          done
+
+      - name: Clean up Psyche Build
+        if: always()
+        run: |
+          set -euo pipefail
+          pids="$(pgrep -f '/Applications/Psyche Build.app/Contents/MacOS/' || true)"
+          if [[ -n "$pids" ]]; then
+            kill -TERM $pids || true
+          fi
+          brew uninstall --cask --zap --force psyche-build 2>/dev/null || true
