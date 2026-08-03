@@ -66,11 +66,11 @@ class UpdatePsycheBuildCaskTest < Minitest::Test
     end
   end
 
-  def test_requires_requested_tag_with_offline_fixtures
+  def test_infers_release_tag_with_offline_fixtures
     with_files do |release, checksums, output|
       result = run_updater(tag: nil, release: release, checksums: checksums, output: output)
-      assert_failure result, /--tag is required with fixture inputs/
-      refute File.exist?(output)
+      assert_success result
+      assert_equal EXPECTED_CASK, File.binread(output)
     end
   end
 
@@ -96,7 +96,7 @@ class UpdatePsycheBuildCaskTest < Minitest::Test
     end
   end
 
-  def test_requires_exactly_the_expected_dmg_assets
+  def test_requires_exactly_three_expected_release_assets
     cases = {
       "missing" => lambda do |json|
         json["assets"].reject! { |asset| asset["name"].end_with?("x86_64.dmg") }
@@ -104,7 +104,7 @@ class UpdatePsycheBuildCaskTest < Minitest::Test
       "duplicate" => lambda do |json|
         json["assets"] << json["assets"].find { |asset| asset["name"].end_with?("aarch64.dmg") }.dup
       end,
-      "unexpected" => lambda do |json|
+      "unexpected DMG" => lambda do |json|
         json["assets"] << {
           "name" => "Psyche-Build-v0.0.1-universal.dmg",
           "browser_download_url" => "https://github.com/OpenCoven/psyche-build/releases/download/v0.0.1/Psyche-Build-v0.0.1-universal.dmg",
@@ -112,35 +112,87 @@ class UpdatePsycheBuildCaskTest < Minitest::Test
           "size" => 1,
         }
       end,
+      "extra non-DMG" => lambda do |json|
+        json["assets"] << {
+          "name" => "release-notes.txt",
+          "browser_download_url" => "https://github.com/OpenCoven/psyche-build/releases/download/v0.0.1/release-notes.txt",
+          "state" => "uploaded",
+          "size" => 1,
+        }
+      end,
+      "malformed non-object" => ->(json) { json["assets"][0] = "not-an-asset-object" },
+      "malformed object" => ->(json) { json["assets"][0] = {} },
     }
 
     cases.each do |label, change|
       with_files(release_change: change) do |release, checksums, output|
         result = run_updater(release: release, checksums: checksums, output: output)
-        assert_failure result, /exactly.*DMG assets/i, label
+        assert_failure result, /exactly.*three.*assets/i, label
         refute File.exist?(output)
       end
     end
   end
 
-  def test_requires_one_uploaded_nonempty_checksum_asset
+  def test_requires_exact_lowercase_sha256_digest_for_each_dmg
     cases = {
-      "missing" => ->(json) { json["assets"].reject! { |asset| asset["name"] == "SHA256SUMS" } },
-      "duplicate" => lambda do |json|
-        json["assets"] << json["assets"].find { |asset| asset["name"] == "SHA256SUMS" }.dup
-      end,
-      "uploading" => lambda do |json|
-        json["assets"].find { |asset| asset["name"] == "SHA256SUMS" }["state"] = "new"
-      end,
-      "empty" => lambda do |json|
-        json["assets"].find { |asset| asset["name"] == "SHA256SUMS" }["size"] = 0
-      end,
+      "missing" => ->(asset) { asset.delete("digest") },
+      "malformed" => ->(asset) { asset["digest"] = "sha256:not-a-hash" },
+      "unsupported" => ->(asset) { asset["digest"] = "sha512:#{"1" * 64}" },
+      "uppercase algorithm" => ->(asset) { asset["digest"] = "SHA256:#{"1" * 64}" },
+      "uppercase hash" => ->(asset) { asset["digest"] = "sha256:#{"A" * 64}" },
+      "non-string" => ->(asset) { asset["digest"] = 123 },
     }
 
     cases.each do |label, change|
+      with_files(release_change: lambda { |json|
+        change.call(json["assets"].find { |asset| asset["name"].end_with?("aarch64.dmg") })
+      }) do |release, checksums, output|
+        result = run_updater(release: release, checksums: checksums, output: output)
+        assert_failure result, /digest/i, label
+        refute File.exist?(output)
+      end
+    end
+  end
+
+  def test_rejects_syntactically_valid_checksum_that_does_not_match_asset_digest
+    wrong_checksums = File.binread(CHECKSUM_FIXTURE).sub("1" * 64, "3" * 64)
+    with_files(checksum_contents: wrong_checksums) do |release, checksums, output|
+      result = run_updater(release: release, checksums: checksums, output: output)
+      assert_failure result, /checksum.*does not match.*digest/i
+      refute File.exist?(output)
+    end
+  end
+
+  def test_requires_one_uploaded_nonempty_checksum_asset
+    cases = {
+      "missing" => [
+        ->(json) { json["assets"].reject! { |asset| asset["name"] == "SHA256SUMS" } },
+        /exactly three expected assets/i,
+      ],
+      "duplicate" => [
+        lambda do |json|
+          json["assets"] << json["assets"].find { |asset| asset["name"] == "SHA256SUMS" }.dup
+        end,
+        /exactly three expected assets/i,
+      ],
+      "uploading" => [
+        lambda do |json|
+          json["assets"].find { |asset| asset["name"] == "SHA256SUMS" }["state"] = "new"
+        end,
+        /fully uploaded/i,
+      ],
+      "empty" => [
+        lambda do |json|
+          json["assets"].find { |asset| asset["name"] == "SHA256SUMS" }["size"] = 0
+        end,
+        /fully uploaded/i,
+      ],
+    }
+
+    cases.each do |label, (change, message)|
       with_files(release_change: change) do |release, checksums, output|
         result = run_updater(release: release, checksums: checksums, output: output)
-        assert_failure result, /SHA256SUMS.*uploaded/i, label
+        assert_failure result, message, label
         refute File.exist?(output)
       end
     end
@@ -174,6 +226,15 @@ class UpdatePsycheBuildCaskTest < Minitest::Test
         assert_failure result, /unexpected download URL/i, url
         refute File.exist?(output)
       end
+    end
+
+    with_files(release_change: lambda { |json|
+      json["assets"].find { |asset| asset["name"] == "SHA256SUMS" }["browser_download_url"] =
+        "https://example.com/SHA256SUMS"
+    }) do |release, checksums, output|
+      result = run_updater(release: release, checksums: checksums, output: output)
+      assert_failure result, /unexpected download URL/i, "SHA256SUMS"
+      refute File.exist?(output)
     end
   end
 
@@ -220,9 +281,44 @@ class UpdatePsycheBuildCaskTest < Minitest::Test
     assert_includes workflow, "git ls-files --error-unmatch Casks/psyche-build.rb"
     assert_includes workflow, "git ls-remote --exit-code --heads origin"
     assert_includes workflow, '--force-with-lease="refs/heads/$BRANCH:$remote_sha"'
-    assert_includes workflow, 'git push origin "HEAD:refs/heads/$BRANCH"'
+    assert_includes workflow, '--force-with-lease="refs/heads/$BRANCH:"'
     refute_match(/git fetch .*\|\| true/, workflow)
     refute_match(/git push .*HEAD:main/, workflow)
+  end
+
+  def test_git_leases_reject_creation_races_and_allow_exact_updates
+    Dir.mktmpdir do |dir|
+      remote = File.join(dir, "remote.git")
+      worker = File.join(dir, "worker")
+      racer = File.join(dir, "racer")
+      branch = "refs/heads/automation/psyche-build-v0.0.1"
+
+      assert_git_success git("init", "--bare", remote)
+      assert_git_success git("init", worker)
+      configure_git(worker)
+      File.binwrite(File.join(worker, "cask"), "first\n")
+      assert_git_success git("-C", worker, "add", "cask")
+      assert_git_success git("-C", worker, "commit", "-m", "first")
+      assert_git_success git("-C", worker, "push", "--force-with-lease=#{branch}:", remote, "HEAD:#{branch}")
+
+      assert_git_success git("clone", remote, racer)
+      configure_git(racer)
+      assert_git_success git("-C", racer, "switch", "--detach", "origin/automation/psyche-build-v0.0.1")
+      File.binwrite(File.join(racer, "cask"), "racing update\n")
+      assert_git_success git("-C", racer, "commit", "-am", "race")
+      assert_git_success git("-C", racer, "push", remote, "HEAD:#{branch}")
+
+      File.binwrite(File.join(worker, "cask"), "intended update\n")
+      assert_git_success git("-C", worker, "commit", "-am", "update")
+      race_result = git("-C", worker, "push", "--force-with-lease=#{branch}:", remote, "HEAD:#{branch}")
+      refute race_result.status.success?, "empty-expectation lease must reject a creation race"
+
+      remote_sha = git("ls-remote", remote, branch).stdout.split.first
+      assert_match(/\A[0-9a-f]{40}\z/, remote_sha)
+      assert_git_success git(
+        "-C", worker, "push", "--force-with-lease=#{branch}:#{remote_sha}", remote, "HEAD:#{branch}"
+      )
+    end
   end
 
   private
@@ -263,5 +359,19 @@ class UpdatePsycheBuildCaskTest < Minitest::Test
   def assert_failure(result, message, label = nil)
     refute result.status.success?, "expected failure#{" for #{label}" if label}"
     assert_match message, result.stderr, "unexpected error#{" for #{label}" if label}"
+  end
+
+  def git(*arguments)
+    stdout, stderr, status = Open3.capture3("git", *arguments)
+    Result.new(stdout: stdout, stderr: stderr, status: status)
+  end
+
+  def configure_git(repository)
+    assert_git_success git("-C", repository, "config", "user.name", "Updater Test")
+    assert_git_success git("-C", repository, "config", "user.email", "updater@example.invalid")
+  end
+
+  def assert_git_success(result)
+    assert result.status.success?, "git failed: #{result.stderr}"
   end
 end

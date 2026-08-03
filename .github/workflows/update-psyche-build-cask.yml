@@ -129,7 +129,7 @@ jobs:
               echo "failed to inspect remote bot branch (git ls-remote exit $status)" >&2
               exit "$status"
             fi
-            git push origin "HEAD:refs/heads/$BRANCH"
+            git push --force-with-lease="refs/heads/$BRANCH:" origin "HEAD:refs/heads/$BRANCH"
           fi
 
       - name: Create or update pull request

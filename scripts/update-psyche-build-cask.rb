@@ -34,9 +34,14 @@ class PsycheBuildCaskUpdater
 
     version = tag.delete_prefix("v")
     names = expected_names(version)
-    validate_assets!(release.fetch("assets"), tag, names)
+    asset_digests = validate_assets!(release.fetch("assets"), tag, names)
 
     sums = parse_checksums(checksums(tag), names.values)
+    sums.each do |name, checksum|
+      next if checksum == asset_digests.fetch(name)
+
+      raise Error, "checksum for #{name} does not match its release asset digest"
+    end
     verify_downloads!(tag, names) unless fixture_mode?
     write_atomically(render(version, sums))
 
@@ -57,9 +62,6 @@ class PsycheBuildCaskUpdater
     if @release_json_path.nil? != @checksums_path.nil?
       raise Error, "--release-json and --checksums must be provided together"
     end
-    return unless fixture_mode? && @requested_tag.nil?
-
-    raise Error, "--tag is required with fixture inputs"
   end
 
   def validate_tag!(tag)
@@ -100,20 +102,14 @@ class PsycheBuildCaskUpdater
   end
 
   def validate_assets!(assets, tag, names)
-    dmg_assets = assets.select do |asset|
-      asset.is_a?(Hash) && asset["name"].is_a?(String) && asset["name"].end_with?(".dmg")
-    end
-    unless dmg_assets.map { |asset| asset["name"] }.sort == names.values.sort
-      raise Error, "release must contain exactly the two expected DMG assets"
-    end
-
-    checksum_assets = assets.select { |asset| asset.is_a?(Hash) && asset["name"] == "SHA256SUMS" }
-    unless checksum_assets.length == 1 && fully_uploaded?(checksum_assets.first)
-      raise Error, "SHA256SUMS asset must exist exactly once and be fully uploaded and nonempty"
+    expected_asset_names = names.values + ["SHA256SUMS"]
+    unless assets.length == 3 &&
+           assets.all? { |asset| asset.is_a?(Hash) && asset["name"].is_a?(String) } &&
+           assets.map { |asset| asset["name"] }.sort == expected_asset_names.sort
+      raise Error, "release must contain exactly three expected assets"
     end
 
-    relevant = dmg_assets + checksum_assets
-    unless relevant.all? { |asset| fully_uploaded?(asset) }
+    unless assets.all? { |asset| fully_uploaded?(asset) }
       raise Error, "release assets must be fully uploaded and nonempty"
     end
 
@@ -121,10 +117,19 @@ class PsycheBuildCaskUpdater
       [name, "#{DOWNLOAD_ROOT}/#{tag}/#{name}"]
     end
     expected_urls["SHA256SUMS"] = "#{DOWNLOAD_ROOT}/#{tag}/SHA256SUMS"
-    relevant.each do |asset|
+    assets.each do |asset|
       next if asset["browser_download_url"] == expected_urls.fetch(asset["name"])
 
       raise Error, "unexpected download URL for #{asset['name']}"
+    end
+
+    names.values.to_h do |name|
+      asset = assets.find { |candidate| candidate["name"] == name }
+      digest = asset["digest"]
+      match = /\Asha256:([0-9a-f]{64})\z/.match(digest) if digest.is_a?(String)
+      raise Error, "invalid release asset digest for #{name}" unless match
+
+      [name, match[1]]
     end
   end
 
