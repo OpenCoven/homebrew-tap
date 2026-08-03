@@ -629,7 +629,12 @@ class UpdatePsycheBuildCaskTest < Minitest::Test
   end
 
   def parse_workflow(path)
-    Psych.safe_load(File.binread(path), [], [], true)
+    Psych.safe_load(
+      File.binread(path),
+      permitted_classes: [],
+      permitted_symbols: [],
+      aliases: true,
+    )
   end
 
   def workflow_steps(parsed)
