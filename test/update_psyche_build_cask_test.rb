@@ -307,10 +307,17 @@ class UpdatePsycheBuildCaskTest < Minitest::Test
       ], requests.map { |request| request.fetch(:url) }
       assert_equal [true, false, false, false], requests.map { |request| request.fetch(:authenticated) }
       requests.each do |request|
-        assert_includes request.fetch(:arguments), "--fail-with-body"
         assert_includes request.fetch(:arguments), "--silent"
         assert_includes request.fetch(:arguments), "--show-error"
         assert_includes request.fetch(:arguments), "--location"
+      end
+      requests.first(2).each do |request|
+        assert_includes request.fetch(:arguments), "--fail-with-body"
+        refute_includes request.fetch(:arguments), "--write-out"
+      end
+      requests.last(2).each do |request|
+        refute_includes request.fetch(:arguments), "--fail-with-body"
+        assert_includes request.fetch(:arguments), "--write-out"
       end
       assert_includes requests.first.fetch(:arguments), "--config -"
 

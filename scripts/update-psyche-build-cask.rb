@@ -171,7 +171,9 @@ class PsycheBuildCaskUpdater
   end
 
   def curl(url, api: false, output: nil, write_out: nil)
-    command = ["curl", "--fail-with-body", "--silent", "--show-error", "--location"]
+    command = ["curl"]
+    command << "--fail-with-body" unless write_out
+    command.concat(["--silent", "--show-error", "--location"])
     command.concat(["--header", "Accept: application/vnd.github+json"]) if api
     token = ENV["GITHUB_TOKEN"]
     stdin_data = ""
