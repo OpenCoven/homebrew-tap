@@ -378,7 +378,7 @@ class UpdatePsycheBuildCaskTest < Minitest::Test
     codesign = "codesign --verify --deep --strict #{app}"
     gatekeeper = "spctl --assess --type execute #{app}"
     stapler = "xcrun stapler validate #{app}"
-    launch = "open -n #{app}"
+    launch = "open -n #{app} >/dev/null 2>&1 &"
     assert_includes workflow, codesign
     assert_includes workflow, gatekeeper
     assert_includes workflow, stapler
@@ -386,6 +386,9 @@ class UpdatePsycheBuildCaskTest < Minitest::Test
     assert_operator workflow.index(codesign), :<, workflow.index(launch)
     assert_operator workflow.index(gatekeeper), :<, workflow.index(launch)
     assert_operator workflow.index(stapler), :<, workflow.index(launch)
+    assert_includes workflow, 'open_pid=$!'
+    assert_includes workflow, 'kill -TERM "$open_pid" 2>/dev/null || true'
+    assert_includes workflow, 'wait "$open_pid" 2>/dev/null || true'
     refute_includes workflow, 'open -na "/Applications/Psyche Build.app"'
     assert_match(/- name: Clean up Psyche Build\n\s+if: always\(\)/, workflow)
   end
