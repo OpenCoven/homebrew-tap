@@ -90,12 +90,21 @@ jobs:
         if: hashFiles('Casks/psyche-build.rb') != ''
         run: |
           set -euo pipefail
+          open_pid=
+          cleanup_open() {
+            if [[ -n "$open_pid" ]]; then
+              kill -TERM "$open_pid" 2>/dev/null || true
+              wait "$open_pid" 2>/dev/null || true
+            fi
+          }
+          trap cleanup_open EXIT
           brew install --cask opencoven/tap/psyche-build
           test -d "/Applications/Psyche Build.app"
           codesign --verify --deep --strict "/Applications/Psyche Build.app"
           spctl --assess --type execute "/Applications/Psyche Build.app"
           xcrun stapler validate "/Applications/Psyche Build.app"
-          open -n "/Applications/Psyche Build.app"
+          open -n "/Applications/Psyche Build.app" >/dev/null 2>&1 &
+          open_pid=$!
 
           for _ in $(seq 1 30); do
             pgrep -f '/Applications/Psyche Build.app/Contents/MacOS/' > "$RUNNER_TEMP/psyche-build.pids" || true
