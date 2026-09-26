@@ -77,6 +77,14 @@ jobs:
         if: always()
         run: brew uninstall --cask coven-cave || true
 
+      # Wand requires macOS 26 and these runners are macOS 15, so the online
+      # audit (URL, checksum, livecheck) is the check here. Install is
+      # verified on macOS 26 when a release is mirrored.
+      - name: brew audit Wand
+        env:
+          HOMEBREW_GITHUB_API_TOKEN: ${{ github.token }}
+        run: brew audit --cask --online opencoven/tap/wand
+
       # Psyche Build is release-gated. Task 7 lands the updater and CI before
       # the first public Cask, so these checks activate only once that Cask is
       # generated from a complete public release.
