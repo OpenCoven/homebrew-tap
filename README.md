@@ -1,7 +1,7 @@
 # OpenCoven Homebrew Tap
 
 Homebrew tap for [OpenCoven](https://github.com/OpenCoven) apps. It ships
-CovenCave today; Psyche Build becomes available after its public v0.0.1
+CovenCave and Wand today; Psyche Build becomes available after its public v0.0.1
 release is published and the generated Cask pull request is merged.
 
 ## Install CovenCave
@@ -32,6 +32,17 @@ brew uninstall --cask coven-cave
 The cask installs the signed + notarized per-architecture DMG (Apple
 Silicon and Intel) from the latest
 [coven-cave release](https://github.com/OpenCoven/coven-cave/releases/latest).
+
+## Install Wand
+
+```bash
+brew install --cask opencoven/tap/wand
+```
+
+Wand needs macOS 26 or later. It updates itself from **Settings > Updates**
+(`auto_updates true`). The cask installs the signed + notarized universal
+zip from [OpenCoven/wand-releases](https://github.com/OpenCoven/wand-releases/releases/latest),
+the public mirror of Wand's releases.
 
 ## Install Psyche Build
 
