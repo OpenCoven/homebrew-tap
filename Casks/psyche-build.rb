@@ -3,9 +3,9 @@
 cask "psyche-build" do
   arch arm: "aarch64", intel: "x86_64"
 
-  version "0.0.1"
-  sha256 arm:   "e0c8cce02cedc7b7cc122c4b453da8ccc665f42da457aa571c2c476d3f03c74f",
-         intel: "c6d62f8aeea1570f377fe6bc2d5c90f5b6a4701390af1c42073465f2a586e882"
+  version "0.0.2"
+  sha256 arm:   "dac0f653e00172e08c7d26f9fb19d7ccbc30af304ac3ed42f6dda91937cc8103",
+         intel: "f9e19a77d0d7bc746226fa510bf3e34e5d96185e6563e53bb1898f0d9423033e"
 
   url "https://github.com/OpenCoven/psyche-build/releases/download/v#{version}/Psyche-Build-v#{version}-#{arch}.dmg"
   name "Psyche Build"
