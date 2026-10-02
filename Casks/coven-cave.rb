@@ -1,9 +1,9 @@
 cask "coven-cave" do
   arch arm: "aarch64", intel: "x86_64"
 
-  version "0.5.6"
-  sha256 arm:   "93ac74a794fab0dc3791d2817150cd86877794f00dfea953018640241dfabbfc",
-         intel: "b2a1b3265c631d5848eaeffb976e5de439e9ad071d69b4562e9c0cddef49b6c9"
+  version "0.5.7"
+  sha256 arm:   "31613051aa1f144a0b52fc4e529243eb0ea61047a4fcd6b5db715f7cecfad25c",
+         intel: "035fdd2c25fa91f42ff59ccaba4d49b1e5232446eddfb49c40c5d47033305678"
 
   url "https://github.com/OpenCoven/coven-cave/releases/download/v#{version}/CovenCave-v#{version}-#{arch}.dmg"
   name "CovenCave"
