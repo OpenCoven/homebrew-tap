@@ -1,6 +1,6 @@
 cask "wand" do
-  version "0.0.26"
-  sha256 "d52d6f0b043732bd3f1f83e5b7483c380da76bfc7b678b4fe9604b6e17c1493d"
+  version "0.0.27"
+  sha256 "77d5c71b086f7d48fda3255686275d06887f7753779a0b2596f91a4d019d70b3"
 
   url "https://github.com/OpenCoven/wand-releases/releases/download/v#{version}/Wand-macOS.zip"
   name "Wand"
